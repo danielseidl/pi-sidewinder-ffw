@@ -6,3 +6,4 @@ venv/
 # drivingsim build artefacts
 drivingsim/DerivedData/
 drivingsim/drivingsim.xcodeproj/
+drivingsim/DerivedDataDevice/
