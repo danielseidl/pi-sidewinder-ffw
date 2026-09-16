@@ -182,7 +182,8 @@ Tools:
 | Tool | Purpose |
 |---|---|
 | `get_status` | Is the wheel present, and which node |
-| `read_position` | One position reading |
+| `read_position` | One steering reading |
+| `read_inputs` | Steering, both pedals and the buttons |
 | `watch_position` | Sample position over a window, with min/max/span |
 | `set_center` | Centring spring, optional duration and strength |
 | `set_damper` | Damper, optional duration and strength |
@@ -218,6 +219,23 @@ who can reach it do that. Accordingly:
 There is no TLS. On a trusted LAN, a token over plain HTTP is reasonable; for
 anything else, put it behind a reverse proxy or tunnel.
 
+### Pedals and buttons
+
+`read_inputs` returns steering, the two pedal axes and the button set:
+
+```json
+{
+  "normalized": 0.403,
+  "raw": 412,
+  "pedals": {"y": 1.0, "rz": 0.238},
+  "buttons": ["button1"],
+  "buttons_raw": 1
+}
+```
+
+`raw` is the 10-bit signed steering value (-512 full left). Pedal values are
+fractions: `0.0` released, `1.0` fully pressed.
+
 ### Running as a service
 
 `sidewinder-wheel-mcp.service` is a systemd unit. Install the scripts and the
@@ -236,6 +254,12 @@ The unit runs as root because the wheel's hidraw node is root-only by default.
 Install the udev rule below and drop `User=root` from the unit to run it
 unprivileged instead.
 
+One hardening trap, found the hard way: listing any `DeviceAllow=` entry turns
+the device cgroup into a whitelist, so the hidraw class must be named
+explicitly. `DeviceAllow=char-usb_device` does not cover it — the wheel's node
+is a plain char device, and the failure surfaces as `Operation not permitted` on
+`open()`, not as a startup error.
+
 ## The report format
 
 The wheel sends report ID `1`, seven bytes:
@@ -250,8 +274,26 @@ The wheel sends report ID `1`, seven bytes:
 Steering is a 10-bit signed field. The two high bits are packed into the low
 bits of byte 2, so the value must be masked to 10 bits and then sign-extended
 from bit 9 rather than read as a little-endian 16-bit integer — a plain 16-bit
-read turns every leftward position into a large positive number. `Y` and `Rz`
-are 6-bit fields, and `0x3f` is their centre.
+read turns every leftward position into a large positive number.
+
+`Y` and `Rz` are the **two pedals**, as 6-bit fields resting at `0x3f`. They
+sweep independently down towards 0 as each pedal is pressed, so they are already
+proportional: no separate button mapping is involved. The resolution is only
+64 steps, which is a limitation of the hardware, not of the decoding. Note that
+byte 6 reads `0x01` on the unit tested and does not change; it is not a button.
+
+Byte 5 carries the buttons, **one bit per button**. Six bits were observed to
+change (`0x01, 0x02, 0x04, 0x08, 0x10, 0x20`); the descriptor declares eight.
+`wheelctl.button_names()` decodes them to `button1`..`button8`.
+
+### The wheel only reports on change
+
+This matters for anything built on top of it. The wheel sends **no periodic
+reports**: leave it alone and the interrupt endpoint is silent, so a read with a
+short timeout legitimately returns "nothing". Every sample must be provoked by
+moving a control, and a fresh `open()` + `read()` pair can miss reports that
+arrived while nobody was listening. If you need a stream, hold the descriptor
+open and read continuously rather than polling with short timeouts.
 
 The HID report descriptor confirms this layout:
 

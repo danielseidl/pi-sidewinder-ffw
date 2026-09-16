@@ -59,6 +59,21 @@ TOOLS = [
         },
     },
     {
+        "name": "read_inputs",
+        "description": "Read the steering, both pedals and the buttons. The "
+                       "pedals are reported as raw axis values (63 = released, "
+                       "0 = fully pressed) and as a fraction (0.0 released, 1.0 "
+                       "pressed). The wheel only sends a report on change, so "
+                       "move the controls while this is called.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "timeout": {"type": "number", "description": "Seconds to wait for a report. Default 3.", "default": 3},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "watch_position",
         "description": "Sample the steering position over a short window and "
                        "return the series. Use this to observe movement without "
@@ -257,6 +272,16 @@ def call_tool(name, arguments):
                         "the wheel's power adapter." % timeout), True
             return _json(_decorate(sample)), False
 
+        if name == "read_inputs":
+            timeout = float(arguments.get("timeout", 3))
+            sample = WHEEL.read_position(timeout)
+            if sample is None:
+                return ("no report arrived within %gs. The wheel only sends a "
+                        "report when something changes, so move the wheel or a "
+                        "pedal while calling. If moving does nothing, check the "
+                        "wheel's power adapter." % timeout), True
+            return _json(_decorate(sample)), False
+
         if name == "watch_position":
             samples = WHEEL.watch(
                 float(arguments.get("seconds", 3)),
@@ -314,11 +339,11 @@ def _opt_float(value):
 
 def _decorate(sample):
     return {
-        "raw": sample["raw"],
         "normalized": sample["normalized"],
-        "y": sample["y"],
-        "rz": sample["rz"],
-        "buttons": sample["buttons"],
+        "raw": sample["raw"],
+        "pedals": sample.get("pedals"),
+        "buttons": sample.get("buttons_set"),
+        "buttons_raw": sample.get("buttons"),
     }
 
 

@@ -15,15 +15,15 @@ RestartSec=2
 # below instead of running as root.
 User=root
 
-# Hardening. The server only needs the wheel node and its own directory.
-# The hidraw number is not stable across replugs, so allow the hidraw class
-# rather than a specific node.
+# Hardening. ProtectSystem=strict does not restrict /dev, but an explicit
+# DeviceAllow list does implicitly switch the device cgroup to a whitelist, so
+# the hidraw class has to be named. The hidraw number is not stable across
+# replugs, hence the class rather than a specific node.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/dev
-DeviceAllow=char-usb_device rw
+DeviceAllow=char-hidraw rw
 DeviceAllow=/dev/hidraw rw
 
 [Install]

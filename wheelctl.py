@@ -190,8 +190,37 @@ def decode_steering_report(data):
         "y": data[3] & 0x3F,
         "rz": data[4] & 0x3F,
         "buttons": data[5],
+        "buttons_set": button_names(data[5]),
+        "pedals": {
+            "y": pedal_fraction(data[3] & 0x3F),
+            "rz": pedal_fraction(data[4] & 0x3F),
+        },
     }
     return sample
+
+
+# The wheel reports its buttons as one bit per button in the button byte.
+# Six bits were observed to change on the unit tested (0x01..0x20); the upper
+# two are documented by the descriptor as eight buttons total.
+BUTTON_BITS = (0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80)
+
+PEDAL_REST = 0x3F
+
+
+def button_names(byte):
+    """Return the names of the buttons currently pressed, e.g. ['button1']."""
+    return ["button%d" % (index + 1) for index, bit in enumerate(BUTTON_BITS)
+            if byte & bit]
+
+
+def pedal_fraction(value):
+    """Map a pedal axis (0..63) to 0.0 (rest) .. 1.0 (fully pressed).
+
+    The pedals rest at 0x3f, so a higher reading means less pressure. Callers
+    wanting "how hard is it pressed" want this; the raw axis is also returned.
+    """
+    value = max(0, min(PEDAL_REST, value))
+    return round((PEDAL_REST - value) / PEDAL_REST, 3)
 
 
 def normalize(raw):
