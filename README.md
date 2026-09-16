@@ -39,13 +39,14 @@ the same way, which is what produces the blip.
 Two further steps are required that the standard path never performs:
 
 - **`PIDDeviceControl` must be sent with `EnableActuators`** (report `0x0c`,
-  value `1`). Actuators are off by default, so effects are accepted and then
-  ignored.
-- **Effects must be written to the parameter block the device actually
-  allocated.** The driver allocates one and its index is readable from the
-  block-load feature report (report `2`); on the unit tested it is block `2`,
-  not the `1` you would assume. Writing to a non-existent block silently does
-  nothing.
+value `1`). Actuators are off by default, so effects are accepted and then
+   ignored.
+- **Use effect block 1.** Feature report `2` advertises the block the kernel
+  driver allocated, which on the unit tested is block `2` — but writing effects
+  there produces no force, and neither does it for the driver's own effects.
+  Block `1` is the one the device actuates. This is counter-intuitive enough
+  that `native_ff.py` pins it as a constant with a comment explaining why; do
+  not "fix" it by reading the feature report.
 
 `native_ff.py` writes the output reports directly over `hidraw`, which is why
 it needs no `evdev` and works despite the driver.
@@ -132,11 +133,12 @@ Add `-v` to any mode to print the reports being sent, which makes it obvious
 when something is not being accepted:
 
 ```
-using effect block 2
+using effect block 1
   -> device control (enable actuators) 0c01
-  -> set effect (type 8)      010208ff7f000003000000ff0000
-  -> set condition            03020003007f81ff00ff0000
-  -> effect op (start)        0a0201ff
+  -> set effect (type 8)      010108ffff00000000ff000400000000
+  -> set condition            030100003f3fffff00
+  -> set condition            030101003f3fffff00
+  -> effect op (start)        0a010101
 ```
 
 Only these modes are implemented. The device advertises more (inertia, friction,
@@ -145,9 +147,10 @@ plus the same block lifecycle described below.
 
 ### Notes gathered while getting this working
 
-- The block index must be read from the device, not assumed. `native_ff.py`
-  does this via feature report `2`; the load status is `1` when the block is
-  ready.
+- Conditions (spring, damper) are written **once per axis** — two `0x03`
+  reports differing only in the axis selector byte.
+- Coefficients `+63/+63` and full saturation are the values known to produce
+  force. They are not symmetric in the way you might expect from the PID spec.
 - Changing an effect's magnitude needs a fresh `set effect` + `set constant`
   each time. Writing only `set constant` to a block that already played leaves
   the old force in place.

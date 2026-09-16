@@ -18,8 +18,9 @@ Two further steps are required that the standard path never performs:
     Actuators are off by default, so effects are accepted and then ignored.
   * Effects must go to the parameter block the device actually allocated. The
     driver allocates one, and its index is readable from the block-load feature
-    report (report 2); on the unit tested it is block 2, not the 1 you would
-    assume. Writing to a non-existent block silently does nothing.
+    report (report 2); on the unit tested that report says block 2, but effects
+    written there produce no force. Block 1 is the one the device actuates.
+    See the BLOCK constant.
 
 This tool writes the PID output reports directly over hidraw, which is why it
 needs no evdev and works despite the driver.
@@ -35,10 +36,9 @@ Modes
 Report layouts, from /sys/kernel/debug/hid/<dev>/rdesc:
 
   0x01  set effect        block(1) type(1) duration(2) trigger(2) axes(1)
-                          direction(2) start-delay(1) gain(1) sample-period(2)
-  0x03  set condition     block(1) ...(1) axis-enable(1) centre(1)
-                          pos-coeff(1) neg-coeff(1) pos-sat(2) neg-sat(2)
-                          deadband(1)
+                          direction(2) start-delay(1) gain(1) padding(4)
+  0x03  set condition     block(1) axis(1) centre(1) pos-coeff(1)
+                          neg-coeff(1) pos-sat(1) neg-sat(1) deadband(1)
   0x05  set constant      block(1) level(int16, -255..255)
   0x0a  effect operation  block(1) operation(1) loop-count(1)
   0x0b  block free        block(1)
@@ -87,19 +87,33 @@ def open_wheel(path=DEV):
         sys.exit("no such device: %s" % path)
 
 
-def find_block(fd):
-    """Read the effect block index the device has allocated.
+# Effect block to drive. Feature report 2 advertises the block the kernel
+# driver allocated (2 on the unit tested), but writing effects to that block
+# produces no force, and neither does block 2 for the driver's own effects.
+# Block 1 is the one the device actuates, confirmed against both spring and
+# constant force. Do not "fix" this by reading feature report 2.
+BLOCK = 1
 
-    Feature report 2 is the block-load report: report id, block index, status.
-    Status 1 means loaded. Fall back to block 1 if the report is unavailable.
+
+def find_block(fd):
+    """Return the effect block to drive.
+
+    Always BLOCK. Kept as a function so callers read explicitly, and because
+    the feature-report probe is still useful when diagnosing a unit whose
+    block numbering differs.
     """
+    return BLOCK
+
+
+def probe_blocks(fd):
+    """Diagnostic: report the block the kernel driver allocated, if readable."""
     try:
         report = get_feature(fd, 2)
         if len(report) >= 3:
             return report[1]
     except OSError:
         pass
-    return 1
+    return None
 
 
 def write_report(fd, payload, label="", verbose=False):
@@ -117,41 +131,63 @@ def device_control(fd, value, verbose=False):
 
 
 def declare_effect(fd, block, effect_type, verbose=False):
-    """Report 0x01: declare an effect of the given type in the block."""
+    """Report 0x01: declare an effect of the given type in the block.
+
+    16 bytes. This mirrors what the kernel driver emits for this device, which
+    is known to produce force; the extra trailing bytes over the 14-byte short
+    form matter on the wire.
+
+    Note the axes-enable byte is 0x01 here, not 0x03.
+    """
     payload = bytes([
         0x01,
         block,
         effect_type,
-        0xFF, 0x7F,  # duration: max
+        0xFF, 0xFF,  # duration: max
         0x00, 0x00,  # trigger button + interval
-        0x03,        # axes enable: X and Y
-        0x00, 0x00,  # direction
+        0x00,        # axes enable
+        0x00, 0xFF,  # direction
         0x00,        # start delay
-        0xFF,        # gain, 100%
-        0x00, 0x00,  # sample period, 0 = device default
+        0x04,        # gain / sample period
+        0x00, 0x00, 0x00, 0x00,
     ])
     write_report(fd, payload, "set effect (type %d)" % effect_type, verbose)
     time.sleep(0.05)
 
 
-def set_condition(fd, block, centre=0, pos_coeff=127, neg_coeff=-127,
+def set_condition(fd, block, axis, centre=0, pos_coeff=63, neg_coeff=63,
                   pos_sat=255, neg_sat=255, deadband=0, verbose=False):
     """Report 0x03: spring / damper / inertia / friction parameters.
 
-    Coefficients and centre are signed bytes. Saturation and deadband are
-    unsigned. All values use the device's own reduced range, not the PID spec's
-    0..10000.
+    Byte layout, packed as the descriptor declares it:
+
+      [0]  effect parameter block index
+      [1]  bits 0-3 parameter block offset
+           bits 4-5 type-specific ordinal 1
+           bits 6-7 type-specific ordinal 2
+      [2]  centre point offset (signed byte)
+      [3]  positive coefficient (signed byte)
+      [4]  negative coefficient (signed byte)
+      [5]  positive saturation (unsigned byte)
+      [6]  negative saturation (unsigned byte)
+      [7]  dead band (unsigned byte)
+
+    Sent once per axis: `axis` selects which condition slot is being written.
+    Coefficients are signed bytes and saturations unsigned bytes; the device's
+    physical range is -10000..10000, so one byte per field is coarse.
+
+    The default coefficients match the kernel driver's output for this device,
+    which is the only configuration verified to produce force.
     """
     payload = bytes([
         0x03,
         block,
-        deadband & 0xFF,
-        0x03,                              # axis enable: X and Y
+        axis & 0xFF,
         centre & 0xFF,
         pos_coeff & 0xFF,
         neg_coeff & 0xFF,
-        pos_sat & 0xFF, (pos_sat >> 8) & 0xFF,
-        neg_sat & 0xFF, (neg_sat >> 8) & 0xFF,
+        pos_sat & 0xFF,
+        neg_sat & 0xFF,
         deadband & 0xFF,
     ])
     write_report(fd, payload, "set condition", verbose)
@@ -167,7 +203,8 @@ def set_constant(fd, block, level, verbose=False):
 
 
 def effect_operation(fd, block, op, verbose=False):
-    write_report(fd, bytes([0x0A, block, op, 0xFF]),
+    """Loop count 1, matching what the driver sends for this device."""
+    write_report(fd, bytes([0x0A, block, op, 0x01]),
                  "effect op (%s)" % {1: "start", 2: "solo", 3: "stop"}.get(op, op),
                  verbose)
 
@@ -190,13 +227,20 @@ def start_effect(fd, block, effect_type, verbose=False):
     declare_effect(fd, block, effect_type, verbose)
 
 
+def apply_condition_both_axes(fd, block, verbose=False, **params):
+    """Conditions are written once per axis, as the driver does."""
+    for axis in (0x00, 0x01):
+        set_condition(fd, block, axis, verbose=verbose, **params)
+
+
 def mode_center(fd, block, seconds=0, verbose=False):
     """Spring pulling the wheel back to centre. The sensible default."""
     print("centre: spring holding the wheel at centre"
           + (" for %.0fs" % seconds if seconds else ""), file=sys.stderr)
     start_effect(fd, block, ET_SPRING, verbose)
-    set_condition(fd, block, centre=0, pos_coeff=127, neg_coeff=-127,
-                  pos_sat=255, neg_sat=255, deadband=0, verbose=verbose)
+    apply_condition_both_axes(fd, block, verbose=verbose,
+                              centre=0, pos_coeff=63, neg_coeff=63,
+                              pos_sat=255, neg_sat=255, deadband=0)
     effect_operation(fd, block, OP_START, verbose)
     if seconds:
         time.sleep(seconds)
@@ -209,8 +253,9 @@ def mode_damper(fd, block, seconds=0, verbose=False):
     print("damper: resistance proportional to turning speed"
           + (" for %.0fs" % seconds if seconds else ""), file=sys.stderr)
     start_effect(fd, block, ET_DAMPER, verbose)
-    set_condition(fd, block, centre=0, pos_coeff=127, neg_coeff=-127,
-                  pos_sat=255, neg_sat=255, deadband=0, verbose=verbose)
+    apply_condition_both_axes(fd, block, verbose=verbose,
+                              centre=0, pos_coeff=63, neg_coeff=63,
+                              pos_sat=255, neg_sat=255, deadband=0)
     effect_operation(fd, block, OP_START, verbose)
     if seconds:
         time.sleep(seconds)
