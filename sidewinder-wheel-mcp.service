@@ -1,0 +1,30 @@
+[Unit]
+Description=SideWinder Force Feedback Wheel MCP server
+Documentation=https://github.com/danielseidl/pi-sidewinder-ffw
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/lib/sidewinder-wheel/mcp_server.py --host 127.0.0.1 --port 8765
+WorkingDirectory=/usr/local/lib/sidewinder-wheel
+Restart=on-failure
+RestartSec=2
+
+# The wheel's hidraw node is root-only unless a udev rule grants the input
+# group access. See README.md; if you installed that rule, set User and Group
+# below instead of running as root.
+User=root
+
+# Hardening. The server only needs the wheel node and its own directory.
+# The hidraw number is not stable across replugs, so allow the hidraw class
+# rather than a specific node.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/dev
+DeviceAllow=char-usb_device rw
+DeviceAllow=/dev/hidraw rw
+
+[Install]
+WantedBy=multi-user.target

@@ -61,18 +61,20 @@ python3 sidewinder.py read
 
 ## Permissions
 
-Reading goes through `/dev/hidrawN`, force feedback through `/dev/input/eventN`.
-Both are root-only by default. Either run with `sudo`, or install a udev rule so
-the `input` group has access:
+Reading and force feedback both go through `/dev/hidrawN`, which is root-only by
+default. Either run with `sudo`, or install a udev rule so the `input` group has
+access:
 
 ```sh
 sudo tee /etc/udev/rules.d/99-sidewinder.rules >/dev/null <<'EOF'
 KERNEL=="hidraw*", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="0034", MODE="0660", GROUP="input"
-SUBSYSTEM=="input", ATTRS{idVendor}=="045e", ATTRS{idProduct}=="0034", MODE="0660", GROUP="input"
 EOF
 sudo udevadm control --reload
 sudo udevadm trigger
 ```
+
+Only the hidraw node matters. The force-feedback path bypasses evdev entirely,
+so no input-node rule is needed.
 
 Then add yourself to the `input` group and log back in:
 
@@ -165,6 +167,74 @@ plus the same block lifecycle described below.
 ```sh
 python3 sidewinder.py read --device /dev/hidraw0
 ```
+
+## MCP server
+
+`mcp_server.py` exposes the wheel to any MCP client over HTTP, so an agent can
+read the steering and drive the force feedback without shell access.
+
+```sh
+sudo python3 mcp_server.py --host 127.0.0.1 --port 8765
+```
+
+Tools:
+
+| Tool | Purpose |
+|---|---|
+| `get_status` | Is the wheel present, and which node |
+| `read_position` | One position reading |
+| `watch_position` | Sample position over a window, with min/max/span |
+| `set_center` | Centring spring, optional duration and strength |
+| `set_damper` | Damper, optional duration and strength |
+| `play_constant` | Constant force, `-255..255`, for a duration |
+| `sweep` | Sweep the full force range |
+| `stop` | Stop all effects, release the wheel |
+
+### Client configuration
+
+```json
+{
+  "mcp": {
+    "sidewinder-wheel": {
+      "type": "remote",
+      "url": "http://wheel-host:8765/mcp"
+    }
+  }
+}
+```
+
+If the server requires a token, add
+`"headers": {"Authorization": "Bearer YOUR_TOKEN"}`.
+
+### Security
+
+Force feedback moves the wheel under its own power, so an open port lets anyone
+who can reach it do that. Accordingly:
+
+- The server binds to `127.0.0.1` by default.
+- Binding to any other address requires a token (`--token`, or the
+  `WHEEL_MCP_TOKEN` environment variable) unless you pass `--insecure`.
+
+There is no TLS. On a trusted LAN, a token over plain HTTP is reasonable; for
+anything else, put it behind a reverse proxy or tunnel.
+
+### Running as a service
+
+`sidewinder-wheel-mcp.service` is a systemd unit. Install the scripts and the
+unit, then enable it:
+
+```sh
+sudo install -d /usr/local/lib/sidewinder-wheel
+sudo install -m644 wheelctl.py native_ff.py sidewinder.py mcp_server.py \
+    /usr/local/lib/sidewinder-wheel/
+sudo install -m644 sidewinder-wheel-mcp.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now sidewinder-wheel-mcp
+```
+
+The unit runs as root because the wheel's hidraw node is root-only by default.
+Install the udev rule below and drop `User=root` from the unit to run it
+unprivileged instead.
 
 ## The report format
 
