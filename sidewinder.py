@@ -154,6 +154,19 @@ def find_ff_device(evdev, ecodes):
     sys.exit("no force-feedback device found (need ABS_X + EV_FF)")
 
 
+def condition_pair(ff, coeff, saturation=0xFFFF):
+    """Spring/damper conditions are supplied as an array of two, one per axis.
+
+    The evdev bindings expose the union member as a fixed-size ctypes array;
+    build it explicitly and fill both slots rather than scaling a single
+    Condition, which is not a supported operation.
+    """
+    pair = (ff.Condition * 2)()
+    pair[0] = ff.Condition(saturation, saturation, coeff, coeff, 0, 0)
+    pair[1] = ff.Condition(saturation, saturation, coeff, coeff, 0, 0)
+    return pair
+
+
 def new_effect(ff, ecodes, etype, replay_ms, **union):
     effect = ff.Effect()
     effect.type = etype
@@ -162,7 +175,10 @@ def new_effect(ff, ecodes, etype, replay_ms, **union):
     effect.ff_trigger = ff.Trigger(0, 0)
     effect.ff_replay = ff.Replay(replay_ms, 0)
     for name, value in union.items():
-        setattr(effect.u, name, value)
+        if name == "ff_condition_effect":
+            effect.u.ff_condition_effect = value
+        else:
+            setattr(effect.u, name, value)
     return effect
 
 
@@ -181,10 +197,9 @@ def upload_constant(device, ff, ecodes, level, ms):
 
 
 def upload_spring(device, ff, ecodes, coeff=0x4000, saturation=0xFFFF):
-    condition = ff.Condition(saturation, saturation, coeff, coeff, 0, 0)
     effect = new_effect(
         ff, ecodes, ecodes.FF_SPRING, 0xFFFF,
-        ff_condition_effect=(condition * 2)())
+        ff_condition_effect=condition_pair(ff, coeff, saturation))
     return device.upload_effect(effect)
 
 
