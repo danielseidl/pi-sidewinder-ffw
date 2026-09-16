@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# drivingsim build artefacts
+drivingsim/DerivedData/
+drivingsim/drivingsim.xcodeproj/
