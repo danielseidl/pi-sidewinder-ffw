@@ -6,35 +6,54 @@ Raspberry Pi (or any Linux box), and drive its force feedback.
 Tested on a Raspberry Pi 5 running Debian 13 with kernel 6.18, against the USB
 SideWinder Force Feedback Wheel (`045e:0034`).
 
-## Why this is not just an evdev joystick
+## Power the wheel first
 
-The kernel supports this wheel out of the box. `hid-generic` and `hid-pidff`
-bind it, an input node appears, and it advertises the full HID PID force
-feedback feature set. `evdev` sees the device and its `ABS_X` axis.
+This wheel does not run off USB power. Its USB descriptor declares `bMaxPower`
+of 100 mA, which cannot drive force-feedback motors, and the wheel's own HID
+stack needs the external supply too: with the barrel-jack adapter unplugged, the
+input node delivers *no reports at all* — no axis movement, no buttons — and the
+FORCE LED flashes. Plug the adapter in and both the steering reports and force
+feedback start working. If nothing here behaves, check that first.
 
-On the unit tested, however, that input node never produced a single event:
-no axis movement, no button presses, not even a `SYN_REPORT`. Reading the same
-device through `hidraw` returned reports immediately, and force feedback played
-correctly through `evdev`. So the wheel was transmitting on the interrupt IN
-endpoint the whole time while the kernel's input layer delivered nothing.
+## Why the standard force-feedback path does not work
 
-Rather than depend on the input node, this tool reads the wheel from `hidraw`
-directly. If your unit does deliver evdev events, `evdev` will work fine too —
-this approach is simply the one that was verified to work.
+The kernel binds `hid-generic` and its `hid-pidff` sub-driver, an input node
+appears, and the device advertises the full HID PID feature set. `evdev` will
+happily upload effects to it and report success. Every effect then comes out as
+a brief blip at imperceptible force.
+
+Captured USB traffic shows why. Asked for a constant-force effect at magnitude
+29490, the driver writes this to the wire:
+
+```
+= 0c04      report 0x0c (PIDDeviceControl), value 4
+```
+
+`0x0c` is the device-control report, not the constant-force report, and the
+magnitude has been truncated to a single digit. This wheel (1998) predates the
+HID PID specification and the driver mis-encodes for it. Duration is mangled
+the same way, which is what produces the blip.
+
+Two further steps are required that the standard path never performs:
+
+- **`PIDDeviceControl` must be sent with `EnableActuators`** (report `0x0c`,
+  value `1`). Actuators are off by default, so effects are accepted and then
+  ignored.
+- **Effects must be written to the parameter block the device actually
+  allocated.** The driver allocates one and its index is readable from the
+  block-load feature report (report `2`); on the unit tested it is block `2`,
+  not the `1` you would assume. Writing to a non-existent block silently does
+  nothing.
+
+`native_ff.py` writes the output reports directly over `hidraw`, which is why
+it needs no `evdev` and works despite the driver.
 
 ## Install
 
-The script has no dependencies for reading:
+Neither script has third-party dependencies:
 
 ```sh
 python3 sidewinder.py read
-```
-
-Force feedback needs the `evdev` package:
-
-```sh
-python3 -m venv ~/.venv
-~/.venv/bin/pip install evdev
 ```
 
 ## Permissions
@@ -93,20 +112,31 @@ steer  -239  norm -0.720  y 63  rz 63  buttons 0x00
 steer  +267  norm +0.527  y 63  rz 63  buttons 0x00
 ```
 
-Play a constant force pushing right for one second:
+Play a constant force pushing right for two seconds:
 
 ```sh
-python3 sidewinder.py ff play --level 0.7 --ms 1000 --gain 90
+sudo python3 native_ff.py 255 2
 ```
 
-Interactively try the different effect types (`a` spring toggle, `l`/`r` push
-left/right, `f` rumble, `c` stop, `q` quit):
+Sweep the force from full-right to full-left, so you can feel the sign change:
 
 ```sh
-python3 sidewinder.py ff demo
+sudo python3 native_ff.py sweep
 ```
 
-Both subcommands accept `--device` if autodetection picks the wrong node:
+Both print the reports they send, which makes it obvious when something is not
+being accepted:
+
+```
+using effect block 2
+  -> device control (enable actuators) 0c01
+  -> set effect                 01020cff7f000003000000ff0000
+  -> set constant (+255)        0502ff00
+  -> effect op (start)          0a0201ff
+  playing +255 for 2.0s
+```
+
+`sidewinder.py` also accepts `--device` if autodetection picks the wrong node:
 
 ```sh
 python3 sidewinder.py read --device /dev/hidraw0
@@ -146,17 +176,28 @@ The HID report descriptor confirms this layout:
 
 ## Force feedback
 
-Force feedback works through `evdev` against the input node, which advertises
-`FF_CONSTANT`, `FF_SPRING`, `FF_DAMPER`, `FF_FRICTION`, `FF_INERTIA`,
-`FF_PERIODIC`, `FF_RUMBLE`, `FF_RAMP` and `FF_AUTOCENTER`.
+Use `native_ff.py`, which writes the device's own PID output reports over
+`hidraw`. The `evdev` route is a dead end on this hardware for the reasons
+described above; `sidewinder.py`'s `ff` subcommand is kept only as a
+demonstration of the broken path and will not produce usable force.
 
-Two details worth knowing, both found the hard way:
+`native_ff.py` implements constant force. The protocol generalises to the other
+effect types the device advertises (`FF_SPRING`, `FF_DAMPER`, `FF_RUMBLE`,
+`FF_PERIODIC`, `FF_RAMP`, and 20 parameter blocks in total); each needs its own
+report from the table in the module docstring plus the same block lifecycle.
 
-- `FF_GAIN` is not an uploadable effect. Uploading one returns `EINVAL`; write
-  it with `EV_FF`/`FF_GAIN` directly.
-- In the `evdev` Python bindings the `ff.Effect` members are plain `ctypes`
-  structs, so the constructor takes no device argument — allocate with
-  `ff.Effect()`, assign the fields, then call `upload_effect`.
+Notes gathered while getting this working:
+
+- The block index must be read from the device, not assumed. `native_ff.py`
+  does this via feature report `2`; the load status is `1` when the block is
+  ready.
+- Changing an effect's magnitude needs a fresh `set effect` + `set constant`
+  each time. Writing only `set constant` to a block that already played leaves
+  the old force in place.
+- `free_block` after stopping. Blocks are a finite pool (20 here) and are not
+  reclaimed implicitly.
+- `FF_GAIN` in `evdev` is not an uploadable effect — uploading one returns
+  `EINVAL`. That matters only for the `sidewinder.py ff` path.
 
 ## License
 
