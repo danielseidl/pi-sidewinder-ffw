@@ -3,6 +3,8 @@
 Read the steering position of a Microsoft SideWinder Force Feedback Wheel from a
 Raspberry Pi (or any Linux box), and drive its force feedback.
 
+The wheel in question: <https://de.wikipedia.org/wiki/Microsoft_SideWinder_Force_Feedback_Wheel>
+
 Tested on a Raspberry Pi 5 running Debian 13 with kernel 6.18, against the USB
 SideWinder Force Feedback Wheel (`045e:0034`).
 
@@ -112,29 +114,48 @@ steer  -239  norm -0.720  y 63  rz 63  buttons 0x00
 steer  +267  norm +0.527  y 63  rz 63  buttons 0x00
 ```
 
-Play a constant force pushing right for two seconds:
+## Force feedback
+
+`native_ff.py` writes the device's own PID output reports over `hidraw`. Modes:
 
 ```sh
-sudo python3 native_ff.py 255 2
+sudo python3 native_ff.py              # centre (default): spring pulls to centre
+sudo python3 native_ff.py center 10    # same, for 10 seconds
+sudo python3 native_ff.py damper       # resistance proportional to turning speed
+sudo python3 native_ff.py constant -150 2.0   # constant force, -255..255
+sudo python3 native_ff.py sweep        # sweep right -> left, for testing
+sudo python3 native_ff.py off          # stop everything, disable actuators
 ```
 
-Sweep the force from full-right to full-left, so you can feel the sign change:
-
-```sh
-sudo python3 native_ff.py sweep
-```
-
-Both print the reports they send, which makes it obvious when something is not
-being accepted:
+`center` and `damper` stay engaged until you run `off` (or the process exits).
+Add `-v` to any mode to print the reports being sent, which makes it obvious
+when something is not being accepted:
 
 ```
 using effect block 2
   -> device control (enable actuators) 0c01
-  -> set effect                 01020cff7f000003000000ff0000
-  -> set constant (+255)        0502ff00
-  -> effect op (start)          0a0201ff
-  playing +255 for 2.0s
+  -> set effect (type 8)      010208ff7f000003000000ff0000
+  -> set condition            03020003007f81ff00ff0000
+  -> effect op (start)        0a0201ff
 ```
+
+Only these modes are implemented. The device advertises more (inertia, friction,
+rumble, periodic, ramp, across 20 parameter blocks); each needs its own report
+plus the same block lifecycle described below.
+
+### Notes gathered while getting this working
+
+- The block index must be read from the device, not assumed. `native_ff.py`
+  does this via feature report `2`; the load status is `1` when the block is
+  ready.
+- Changing an effect's magnitude needs a fresh `set effect` + `set constant`
+  each time. Writing only `set constant` to a block that already played leaves
+  the old force in place.
+- `free_block` after stopping. Blocks are a finite pool (20 here) and are not
+  reclaimed implicitly.
+- The device's value ranges are much smaller than the PID spec's: constant force
+  is `-255..255` rather than `-10000..10000`, and spring coefficients are signed
+  bytes.
 
 `sidewinder.py` also accepts `--device` if autodetection picks the wrong node:
 
@@ -173,31 +194,6 @@ The HID report descriptor confirms this layout:
 0x95 0x01        Report Count (1)
 0x81 0x02        Input (Data, Variable, Absolute)
 ```
-
-## Force feedback
-
-Use `native_ff.py`, which writes the device's own PID output reports over
-`hidraw`. The `evdev` route is a dead end on this hardware for the reasons
-described above; `sidewinder.py`'s `ff` subcommand is kept only as a
-demonstration of the broken path and will not produce usable force.
-
-`native_ff.py` implements constant force. The protocol generalises to the other
-effect types the device advertises (`FF_SPRING`, `FF_DAMPER`, `FF_RUMBLE`,
-`FF_PERIODIC`, `FF_RAMP`, and 20 parameter blocks in total); each needs its own
-report from the table in the module docstring plus the same block lifecycle.
-
-Notes gathered while getting this working:
-
-- The block index must be read from the device, not assumed. `native_ff.py`
-  does this via feature report `2`; the load status is `1` when the block is
-  ready.
-- Changing an effect's magnitude needs a fresh `set effect` + `set constant`
-  each time. Writing only `set constant` to a block that already played leaves
-  the old force in place.
-- `free_block` after stopping. Blocks are a finite pool (20 here) and are not
-  reclaimed implicitly.
-- `FF_GAIN` in `evdev` is not an uploadable effect — uploading one returns
-  `EINVAL`. That matters only for the `sidewinder.py ff` path.
 
 ## License
 
